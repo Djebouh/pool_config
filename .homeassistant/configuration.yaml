@@ -1,0 +1,114 @@
+homeassistant:
+  # Name of the location where Home Assistant is running
+  name: Pool Boy
+  # Location required to calculate the time the sun rises and sets
+  latitude: !secret my_latitude
+  longitude: !secret my_longitude
+  # Impacts weather/sunrise data (altitude above sea level in meters)
+  elevation: 24
+  # metric for Metric, imperial for Imperial
+  unit_system: metric
+  # Pick yours from here: http://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+  time_zone: Europe/Paris
+  # Customization file
+  customize: !include customize.yaml
+  # Customization file
+  packages: !include_dir_named packages
+
+
+# Enables the frontend
+frontend:
+  # javascript_version: latest
+  themes: !include_dir_merge_named themes/
+
+# Enables configuration UI
+config:
+
+system_health:
+
+
+# Checks for available updates
+updater:
+  # Optional, allows Home Assistant developers to focus on popular components.
+  include_used_components: true
+
+
+# Enables support for tracking state changes over time
+history:
+
+# View all events in a logbook
+logbook:
+
+recorder:
+  purge_keep_days: 5
+
+hacs:
+  token: !secret hacs_git_token
+  python_script: true
+  theme: true
+
+# Enables a map showing the location of tracked devices
+#map:
+
+# Track the sun
+sun:
+
+shell_command:
+  reboot_pi: 'sudo reboot'
+
+# Sensors
+sensor:
+  - platform: rpi_power
+    text_state: true
+
+  - platform: onewire
+    names:
+      28-02131213e3aa: pool_water
+
+  - platform: template
+    sensors:
+      pool_temperature:
+        friendly_name: "pool water temperature"
+        unit_of_measurement: "°C"
+        value_template: >-
+          {%- set temperature = (states('sensor.pool_water_temperature') | float + 1.5) -%}
+          {{ temperature if temperature < 50 else "unavailable" }}
+        entity_id: sensor.pool_water_temperature
+        device_class: temperature
+
+
+timer:
+  warmup:
+    name: Warm-Up
+    duration: '00:05:00'
+    icon: mdi:sleep
+
+
+mqtt:
+  broker: !secret mqtt_server
+
+
+mqtt_statestream:
+  base_topic: poolassistant
+  include:
+    entities:
+      - sensor.ph
+      - sensor.redox
+      - sensor.pool_temperature
+      - switch.cl_injection
+      - switch.ph_injection
+      - automation.cl_regul_injection_automation
+      - automation.ph_regul_injection_automation
+
+
+switch:
+  - platform: rpi_gpio
+    ports:
+      17: pH- injection gpio
+      27: Cl+ injection gpio
+
+
+group: !include groups.yaml
+script: !include scripts.yaml
+# automation: !include_dir_merge_list automation/
+automation: !include automations.yaml

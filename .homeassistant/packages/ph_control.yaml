@@ -1,0 +1,321 @@
+homeassistant:
+  customize:
+    automation.ph_regul_injection_automation:
+    icon: mdi:home-assistant
+
+
+sensor:
+  - name: pH
+    platform: rest
+    resource: http://localhost/rest/read/BNC1
+    value_template: >-
+      {%- set result = value.split(' ')[0] | float -%}
+      {{ result if result != 0 else "unavailable" }}
+    unit_of_measurement: "pH"
+
+
+input_number:
+  ph_regul_target:
+    name: Target pH
+    min: 6.5
+    max: 8
+    step: 0.1
+    unit_of_measurement: "pH"
+
+
+timer:
+  ph_regul_one_shoot:
+    name: pH- injection
+    duration: '00:02:00'
+    icon: mdi:needle
+
+  ph_regul_remaining_max:
+    name: Max daily pH- injection
+    duration: '00:20:00'
+    icon: mdi:seatbelt
+
+  ph_regul_sleep:
+    name: Sleep before next pH- injection
+    duration: '00:25:00'
+    icon: mdi:sleep
+
+
+binary_sensor:
+  - platform: template
+    sensors:
+      ph_regul_bt:
+        friendly_name: "pH Regul - Injection required"
+        entity_id:
+          - sensor.ph
+          - input_number.ph_regul_target
+        value_template: >-
+          {% if (states.sensor.ph is none or is_state('sensor.ph', 'unavailable')) %}
+            False
+          {% elif (states.input_number.ph_regul_target is none) %}
+            False
+          {% else %}
+            {{ states('sensor.ph') | float > states('input_number.ph_regul_target') | float }}
+          {% endif %}
+
+      ph_regul_wt:
+        friendly_name: "pH Regul - Within margin"
+        entity_id:
+          - sensor.ph
+          - input_number.ph_regul_target
+        value_template: >-
+          {% if (states.sensor.ph is none or is_state('sensor.ph', 'unavailable')) %}
+            False
+          {% elif (states.input_number.ph_regul_target is none) %}
+            False
+          {% else %}
+            {{ states('sensor.ph') | float > (states('input_number.ph_regul_target') | float - 0.05)}}
+          {% endif %}
+
+
+switch:
+  - platform: template
+    switches:
+      ph_injection:
+        friendly_name: pH- injection
+        entity_id: switch.ph_injection_gpio
+        value_template: "{{ is_state('switch.ph_injection_gpio', 'off') }}"
+        icon_template: mdi:needle
+        turn_on:
+          service: switch.turn_off
+          entity_id: switch.ph_injection_gpio
+        turn_off:
+          service: switch.turn_on
+          entity_id: switch.ph_injection_gpio
+
+
+automation:
+  ############################################################
+  # Regulation Control
+  ############################################################
+  - alias: pH Regul - Stop regulation
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: automation.ph_regul_injection_automation
+      to: 'off'
+    action:
+      - service: switch.turn_off
+        entity_id: switch.ph_injection
+
+
+  ############################################################
+  # When below threshold, inject
+  ############################################################
+  - alias: pH Regul - Injection Automation
+    # initial_state: 'off'
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.ph_regul_bt
+        to: 'on'
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ph_regul_sleep
+      - platform: state
+        entity_id: automation.ph_regul_injection_automation
+        to: 'on'
+        for:
+          minutes: 1
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.warmup
+    condition:
+      - condition: state
+        entity_id: binary_sensor.ph_regul_wt
+        state: 'on'
+      - condition: state
+        entity_id: timer.warmup
+        state: 'idle'
+    action:
+      - service: switch.turn_on
+        entity_id: switch.ph_injection
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/event/ph_regul_injection_automation/start"
+          qos: 2
+          payload: >-
+            {
+              "start_time": "{{ now() }}",
+              "current_ph": {{ states('sensor.ph') | float }},
+              "target_ph": {{ states('input_number.ph_regul_target') | float }}
+            }
+
+
+  ############################################################
+  # When above threshold, stop injecting
+  ############################################################
+  - alias: pH Regul - Stop injection above Target
+    initial_state: 'on'
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.ph_regul_wt
+        to: 'off'
+    action:
+      service: switch.turn_off
+      entity_id: switch.ph_injection
+
+
+  ############################################################
+  # Monitor injection time
+  ############################################################
+  - alias: pH Regul - Monitor injection time - on Start
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: switch.ph_injection
+      to: 'on'
+    action:
+      - service: timer.start
+        entity_id: timer.ph_regul_remaining_max
+      - service: timer.start
+        entity_id: timer.ph_regul_one_shoot
+      - service: timer.cancel
+        entity_id: timer.ph_regul_sleep
+
+
+  - alias: pH Regul - Control injection duration
+    initial_state: 'on'
+    trigger:
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.ph_regul_one_shoot
+    action:
+      service: switch.turn_off
+      entity_id: switch.ph_injection
+
+
+  - alias: pH Regul - Monitor injection time - on Stop
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: switch.ph_injection
+      to: 'off'
+    action:
+      - service: timer.pause
+        entity_id: timer.ph_regul_remaining_max
+      - service: timer.cancel
+        entity_id: timer.ph_regul_one_shoot
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/event/ph_regul_injection/stop"
+          qos: 2
+          payload: >-
+            {
+              "end_time": "{{ now() }}",
+              "duration": {{ as_timestamp(trigger.to_state.last_changed) - as_timestamp(trigger.from_state.last_changed) }},
+              "current_ph": {{ states('sensor.ph') | float }},
+              "target_ph": {{ states('input_number.ph_regul_target') | float }}
+            }
+      - condition: state
+        entity_id: timer.warmup
+        state: 'idle'
+      - service: timer.start
+        entity_id: timer.ph_regul_sleep
+
+
+  - alias: pH Regul - Stop when excessive daily injection
+    initial_state: 'on'
+    trigger:
+      platform: event
+      event_type: timer.finished
+      event_data:
+        entity_id: timer.ph_regul_remaining_max
+    action:
+      # - service: input_boolean.turn_off
+      #   entity_id: input_boolean.ph_regul
+      - service: automation.turn_off
+        entity_id: automation.ph_regul_injection_automation
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/alert/ph_regul_max_reached"
+          payload: "on"
+          qos: 2
+
+  - alias: pH Regul - Monitor injection time - Reset daily limit
+    initial_state: 'on'
+    trigger:
+      platform: time
+      at: '03:00:00'
+    action:
+      service: timer.cancel
+      entity_id: timer.ph_regul_remaining_max
+
+
+  ############################################################
+  # Monitor quality of mesure
+  ############################################################
+  - alias: pH Regul - Alert when mesure unavailable
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: sensor.ph
+      to: 'unavailable'
+      for:
+        minutes: 1
+    action:
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/alert/ph"
+          payload: "unavailable"
+          qos: 2
+
+
+  ############################################################
+  # Pilot from Master HASS
+  ############################################################
+  - alias: 'pH Regul - Start Regulation on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/automation/ph_regul_injection_automation/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'ON' }}"
+    action:
+      service: automation.turn_on
+      entity_id: automation.ph_regul_injection_automation
+
+  - alias: 'pH Regul - Stop Regulation on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/automation/ph_regul_injection_automation/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'OFF' }}"
+    action:
+      service: automation.turn_off
+      entity_id: automation.ph_regul_injection_automation
+
+  - alias: 'Ph Regul - Start Injection on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/switch/ph_injection/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'ON' }}"
+    action:
+      service: switch.turn_on
+      entity_id: switch.ph_injection
+
+  - alias: 'Ph Regul - Stop Injection on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/switch/ph_injection/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'OFF' }}"
+    action:
+      service: switch.turn_off
+      entity_id: switch.ph_injection
+
+      

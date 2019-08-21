@@ -1,0 +1,70 @@
+############################################################
+# Boot
+############################################################
+
+- alias: 'Init Regulation'
+  initial_state: 'on'
+  trigger:
+    - platform: homeassistant
+      event: start
+  action:
+    - service: switch.turn_on
+      entity_id:
+        - switch.cl_injection_gpio
+        - switch.ph_injection_gpio
+
+############################################################
+# Send event 5MN_AFTER_HASS_START, 2 mn after homeassistant started
+############################################################
+
+- alias: 'throw event 5 minute after homeassistant starts'
+  initial_state: 'on'
+  trigger:
+    platform: homeassistant
+    event: start
+  action:
+    - service: timer.start
+      entity_id: timer.warmup
+    - delay:
+        minutes: 5
+    - event: 5MN_AFTER_HASS_START
+
+
+############################################################
+# Notify when new Home Assistant updates are available
+############################################################
+
+- alias: 'Update Available Notifications'
+  initial_state: 'on'
+  trigger:
+    platform: state
+    entity_id: updater.updater
+  action:
+    - service: persistent_notification.create
+      data:
+        title: "Hass Update"
+        message: 'Update for Home Assistant is available.'
+        notification_id: hass_update
+
+
+
+
+- alias: Power Problem Notification
+  initial_state: 'on'
+  trigger:
+  - platform: numeric_state
+    entity_id: sensor.rpi_power_status
+    value_template: '{{ state.attributes.value }}'
+    above: 0
+    for:
+      minutes: 5
+  condition:
+  action:
+  - service: persistent_notification.create
+    data_template:
+      message: "RPI Power reported {{ states.sensor.rpi_power_status.state }}. The state had changed from {{ trigger.from_state.state }} "
+      title: Power Supply Issue
+  - service: notify.notify
+    data_template:
+      message: "RPI Power reported {{ states.sensor.rpi_power_status.state }}. The state had  changed from {{ trigger.from_state.state }}"
+      title: Power Supply Issue

@@ -1,0 +1,337 @@
+homeassistant:
+  customize:
+    automation.cl_regul_injection_automation:
+    icon: mdi:home-assistant
+
+
+sensor:
+  - name: Redox
+    platform: rest
+    resource: http://localhost/rest/read/BNC2
+    value_template: >-
+      {%- set result = value.split(' ')[0] | float -%}
+      {{ result if result != 0 else "unavailable" }}
+    unit_of_measurement: "mV"
+
+
+input_number:
+  cl_regul_target:
+    name: Target Redox
+    min: 500
+    max: 850
+    step: 5
+    unit_of_measurement: "mV"
+
+
+timer:
+  cl_regul_one_shoot:
+    name: Cl+ injection
+    duration: '00:15:00'
+    icon: mdi:needle
+
+  cl_regul_remaining_max:
+    name: Max daily Cl+ injection
+    duration: '02:31:00'
+    icon: mdi:seatbelt
+    
+  cl_regul_sleep:
+    name: Sleep before next Cl+ injection
+    duration: '00:45:00'
+    icon: mdi:sleep
+
+
+binary_sensor:
+  - platform: template
+    sensors:
+      cl_regul_bt:
+        friendly_name: "Cl Regul - Injection required"
+        entity_id:
+          - sensor.redox
+          - input_number.cl_regul_target
+        value_template: >-
+          {% if (states.sensor.redox is none or is_state('sensor.redox', 'unavailable')) %}
+            False
+          {% elif (states.input_number.cl_regul_target is none) %}
+            False
+          {% else %}
+            {% set now_hours =now().hour %}
+            {{
+              (states('sensor.redox') | int < states('input_number.cl_regul_target') | int) or 
+              ((states('sensor.redox') | int < 750) and ((now_hours >= 23) or (now_hours < 6)))
+            }}
+          {% endif %}
+
+      cl_regul_wt:
+        friendly_name: "Cl Regul - Within margin"
+        entity_id:
+          - sensor.redox
+          - input_number.cl_regul_target
+        value_template: >-
+          {% if (states.sensor.redox is none or is_state('sensor.redox', 'unavailable')) %}
+            False
+          {% elif (states.input_number.cl_regul_target is none) %}
+            False
+          {% else %}
+            {% set now_hours =now().hour %}
+            {{
+              (states('sensor.redox') | int < (states('input_number.cl_regul_target') | int + 2)) or 
+              ((states('sensor.redox') | int < 752) and ((now_hours >= 23) or (now_hours < 6)))
+            }}
+          {% endif %}
+
+
+switch:
+  - platform: template
+    switches:
+      cl_injection:
+        friendly_name: Cl+ injection
+        entity_id: switch.cl_injection_gpio
+        value_template: "{{ is_state('switch.cl_injection_gpio', 'off') }}"
+        icon_template: mdi:needle
+        turn_on:
+          service: switch.turn_off
+          data:
+            entity_id: switch.cl_injection_gpio
+        turn_off:
+          service: switch.turn_on
+          data:
+            entity_id: switch.cl_injection_gpio
+
+
+automation:
+  ############################################################
+  # Regulation Control
+  ############################################################
+
+  - alias: Cl Regul - Stop regulation
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: automation.cl_regul_injection_automation
+      to: 'off'
+    action:
+      - service: switch.turn_off
+        entity_id: switch.cl_injection
+
+
+  ############################################################
+  # When below threshold, inject
+  ############################################################
+  - alias: Cl Regul - Injection Automation
+    # initial_state: 'off'
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cl_regul_bt
+        to: 'on'
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.cl_regul_sleep
+      - platform: state
+        entity_id: automation.cl_regul_injection_automation
+        to: 'on'
+        for:
+          minutes: 1
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.warmup
+      - platform: time
+        at: '23:00:01'
+    condition:
+      - condition: state
+        entity_id: switch.cl_injection
+        state: 'off'
+      - condition: state
+        entity_id: binary_sensor.cl_regul_wt
+        state: 'on'
+      - condition: state
+        entity_id: timer.warmup
+        state: 'idle'
+    action:
+      - service: switch.turn_on
+        entity_id: switch.cl_injection
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/event/cl_regul_injection_automation/start"
+          qos: 2
+          payload: >-
+            {
+              "start_time": "{{ now() }}",
+              "current_redox": {{ states('sensor.redox') | round | int }},
+              "target_redox": {{ states('input_number.cl_regul_target') | round | int }}
+            }
+
+
+  ############################################################
+  # When above threshold, stop injecting
+  ############################################################
+  - alias: Cl Regul - Stop injection above Target
+    initial_state: 'on'
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.cl_regul_wt
+        to: 'off'
+    action:
+      service: switch.turn_off
+      entity_id: switch.cl_injection
+
+
+  ############################################################
+  # Monitor injection time
+  ############################################################
+  - alias: Cl Regul - Monitor injection time - on Start
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: switch.cl_injection
+      to: 'on'
+    action:
+      - service: timer.start
+        entity_id: timer.cl_regul_remaining_max
+      - service: timer.start
+        entity_id: timer.cl_regul_one_shoot
+      - service: timer.cancel
+        entity_id: timer.cl_regul_sleep
+
+
+  - alias: Cl Regul - Control injection duration
+    initial_state: 'on'
+    trigger:
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.cl_regul_one_shoot
+    action:
+      service: switch.turn_off
+      entity_id: switch.cl_injection
+
+
+  - alias: Cl Regul - Monitor injection time - on Stop
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: switch.cl_injection
+      to: 'off'
+    action:
+      - service: timer.pause
+        entity_id: timer.cl_regul_remaining_max
+      - service: timer.cancel
+        entity_id: timer.cl_regul_one_shoot
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/event/cl_regul_injection/stop"
+          qos: 2
+          payload: >-
+            {
+              "end_time": "{{ now() }}",
+              "duration": {{ as_timestamp(trigger.to_state.last_changed) - as_timestamp(trigger.from_state.last_changed) }},
+              "current_redox": {{ states('sensor.redox') | round | int }},
+              "target_redox": {{ states('input_number.cl_regul_target') | round | int }}
+            }
+      - condition: state
+        entity_id: timer.warmup
+        state: 'idle'
+      - service: timer.start
+        entity_id: timer.cl_regul_sleep
+
+
+  - alias: Cl Regul - Stop when excessive daily injection
+    initial_state: 'on'
+    trigger:
+      platform: event
+      event_type: timer.finished
+      event_data:
+        entity_id: timer.cl_regul_remaining_max
+    action:
+      - service: automation.turn_off
+        entity_id: automation.cl_regul_injection_automation
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/alert/cl_regul_max_reached"
+          payload: "on"
+          qos: 2
+
+
+  - alias: Cl Regul - Monitor injection time - Reset daily limit
+    initial_state: 'on'
+    trigger:
+      platform: time
+      at: '03:00:00'
+    action:
+      service: timer.cancel
+      entity_id: timer.cl_regul_remaining_max
+
+
+  ############################################################
+  # Monitor quality of mesure
+  ############################################################
+  - alias: Cl Regul - Alert when mesure unavailable
+    initial_state: 'on'
+    trigger:
+      platform: state
+      entity_id: sensor.redox
+      to: 'unavailable'
+      for:
+        minutes: 1
+    action:
+      - service: mqtt.publish
+        data_template:
+          topic: "poolassistant/alert/redox"
+          payload: "unavailable"
+          qos: 2
+
+
+
+  ############################################################
+  # Pilot from Master HASS
+  ############################################################
+
+  - alias: 'Cl Regul - Start Regulation on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/automation/cl_regul_injection_automation/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'ON' }}"
+    action:
+      service: automation.turn_on
+      entity_id: automation.cl_regul_injection_automation
+
+  - alias: 'Cl Regul - Stop Regulation on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/automation/cl_regul_injection_automation/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'OFF' }}"
+    action:
+      service: automation.turn_off
+      entity_id: automation.cl_regul_injection_automation
+
+  - alias: 'Cl Regul - Start Injection on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/switch/cl_injection/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'ON' }}"
+    action:
+      service: switch.turn_on
+      entity_id: switch.cl_injection
+
+  - alias: 'Cl Regul - Stop Injection on master HASS MQTT'
+    initial_state: 'on'
+    trigger:
+      platform: mqtt
+      topic: poolassistant/switch/cl_injection/set
+    condition:
+      condition: template
+      value_template: "{{ trigger.payload == 'OFF' }}"
+    action:
+      service: switch.turn_off
+      entity_id: switch.cl_injection
+
