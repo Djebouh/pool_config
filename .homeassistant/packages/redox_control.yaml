@@ -17,7 +17,14 @@ sensor:
 input_number:
   cl_regul_target:
     name: Target Redox
-    min: 500
+    min: 600
+    max: 800
+    step: 5
+    unit_of_measurement: "mV"
+
+  cl_night_target:
+    name: Target Redox at night
+    min: 600
     max: 850
     step: 5
     unit_of_measurement: "mV"
@@ -48,16 +55,19 @@ binary_sensor:
         entity_id:
           - sensor.redox
           - input_number.cl_regul_target
+          - input_number.cl_night_target
         value_template: >-
           {% if (states.sensor.redox is none or is_state('sensor.redox', 'unavailable')) %}
             False
           {% elif (states.input_number.cl_regul_target is none) %}
             False
+          {% elif (states.input_number.cl_night_target is none) %}
+            False
           {% else %}
             {% set now_hours =now().hour %}
             {{
               (states('sensor.redox') | int < states('input_number.cl_regul_target') | int) or 
-              ((states('sensor.redox') | int < 750) and ((now_hours >= 23) or (now_hours < 6)))
+              ((states('sensor.redox') | int < states('input_number.cl_night_target') | int) and ((now_hours >= 23) or (now_hours < 6)))
             }}
           {% endif %}
 
@@ -66,16 +76,19 @@ binary_sensor:
         entity_id:
           - sensor.redox
           - input_number.cl_regul_target
+          - input_number.cl_night_target
         value_template: >-
           {% if (states.sensor.redox is none or is_state('sensor.redox', 'unavailable')) %}
             False
           {% elif (states.input_number.cl_regul_target is none) %}
             False
+          {% elif (states.input_number.cl_night_target is none) %}
+            False
           {% else %}
             {% set now_hours =now().hour %}
             {{
               (states('sensor.redox') | int < (states('input_number.cl_regul_target') | int + 2)) or 
-              ((states('sensor.redox') | int < 752) and ((now_hours >= 23) or (now_hours < 6)))
+              ((states('sensor.redox') | int < (states('input_number.cl_night_target') | int + 2)) and ((now_hours >= 23) or (now_hours < 6)))
             }}
           {% endif %}
 

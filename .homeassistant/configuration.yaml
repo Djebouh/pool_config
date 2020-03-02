@@ -56,6 +56,14 @@ sun:
 shell_command:
   reboot_pi: 'sudo reboot'
 
+input_number:
+  temp_correction:
+    name: Pool temperature correction
+    min: -2
+    max: 2
+    step: 0.1
+    unit_of_measurement: "°C"
+
 # Sensors
 sensor:
   - platform: rpi_power
@@ -71,9 +79,11 @@ sensor:
         friendly_name: "pool water temperature"
         unit_of_measurement: "°C"
         value_template: >-
-          {%- set temperature = (states('sensor.pool_water_temperature') | float + 1.5) -%}
+          {%- set temperature = ((states('sensor.pool_water_temperature') | float) + (states('input_number.temp_correction') | float)) -%}
           {{ temperature if temperature < 50 else "unavailable" }}
-        entity_id: sensor.pool_water_temperature
+        entity_id:
+          - sensor.pool_water_temperature
+          - input_number.temp_correction
         device_class: temperature
 
 
